@@ -48,7 +48,7 @@ module.exports = {
           allowNull: false,
           type: Sequelize.DATE
         }
-      })
+      }, { transaction })
       await queryInterface.createTable(TABLE_NAMES.USERPROVIDER, {
         id: {
           type: Sequelize.UUID,
@@ -97,73 +97,64 @@ module.exports = {
           allowNull: false,
           type: Sequelize.DATE
         }
-      })
+      }, { transaction })
 
-      const [teams, metadata] = await queryInterface.sequelize.query(`
+      const teams = await queryInterface.sequelize.query(`
         SELECT "id", "slackId", "slackData", "googleId" FROM teams
-      `)
+      `, { type: Sequelize.QueryTypes.SELECT, transaction })
       await Promise.all(teams.map(team => {
-        try {
-          var providers = []
-          const now = new Date()
-          if (team.slackId) {
-            providers.push({
-              id: uuidv4(),
-              plugin: 'slack',
-              externalTeamId: team.slackId,
-              data: team.slackData,
-              teamId: team.id,
-              createdAt: now,
-              updatedAt: now
-            })
-          }
-          if (team.googleId) {
-            providers.push({
-              id: uuidv4(),
-              plugin: 'google',
-              externalTeamId: team.googleId,
-              teamId: team.id,
-              createdAt: now,
-              updatedAt: now
-            })
-          }
-          return queryInterface.bulkInsert(TABLE_NAMES.PROVIDER, providers)
-        } catch (err) {
-          return Promise.reject(err)
-        }
-      }))
-
-      const [users,] = await queryInterface.sequelize.query(`
-        SELECT "id", "isAdmin", "serviceId", "service", "teamId" FROM users;
-      `)
-      await Promise.all(users.map(async user => {
+        var providers = []
         const now = new Date()
-
-        try {
-          const provider = (await queryInterface.sequelize.query(`
-            SELECT "id" FROM ${TABLE_NAMES.PROVIDER}
-            WHERE "plugin" = ? and "teamId" = ?
-          `, {
-            replacements: [user.service, user.teamId],
-            type: Sequelize.QueryTypes.SELECT
-          }))[0]
-
-          return queryInterface.bulkInsert(TABLE_NAMES.USERPROVIDER, [{
+        if (team.slackId) {
+          providers.push({
             id: uuidv4(),
-            userId: user.id,
-            externalUserId: user.serviceId,
-            isTeamAdmin: user.isAdmin,
-            authenticationProviderId: provider.id,
+            plugin: 'slack',
+            externalTeamId: team.slackId,
+            data: team.slackData,
+            teamId: team.id,
             createdAt: now,
             updatedAt: now
-          }])
-        } catch (err) {
-          return Promise.reject(err)
+          })
         }
-      }))
+        if (team.googleId) {
+          providers.push({
+            id: uuidv4(),
+            plugin: 'google',
+            externalTeamId: team.googleId,
+            teamId: team.id,
+            createdAt: now,
+            updatedAt: now
+          })
+        }
+        return queryInterface.bulkInsert(TABLE_NAMES.PROVIDER, providers, { transaction })
+      })).catch(err => { throw err })
+
+      const users = await queryInterface.sequelize.query(`
+        SELECT users."id", "isAdmin", "serviceId", "slackData",
+          ${TABLE_NAMES.PROVIDER}.id AS "providerId", ${TABLE_NAMES.PROVIDER}."plugin"
+        FROM users
+        INNER JOIN ${TABLE_NAMES.PROVIDER}
+        ON users."teamId" = ${TABLE_NAMES.PROVIDER}."teamId" 
+          and users."service" = ${TABLE_NAMES.PROVIDER}."plugin";
+      `, { type: Sequelize.QueryTypes.SELECT, transaction })
+
+      await Promise.all(users.map(async user => {
+        const now = new Date()
+        return queryInterface.bulkInsert(TABLE_NAMES.USERPROVIDER, [{
+          id: uuidv4(),
+          userId: user.id,
+          externalUserId: user.serviceId,
+          isTeamAdmin: user.isAdmin,
+          authenticationProviderId: user.providerId,
+          createdAt: now,
+          updatedAt: now,
+          ...(user.plugin == 'slack' ? { data: user.slackData } : null)
+        }], { transaction })
+      })).catch(err => { throw err })
 
       await transaction.commit()
     } catch (err) {
+      console.error('Migration failed, rolling back')
       await transaction.rollback()
       throw err
     }
@@ -172,10 +163,11 @@ module.exports = {
   down: async (queryInterface, Sequelize) => {
     const transaction = await queryInterface.sequelize.transaction()
     try {
-      queryInterface.dropTable(TABLE_NAMES.USERPROVIDER)
-      queryInterface.dropTable(TABLE_NAMES.PROVIDER)
+      await queryInterface.dropTable(TABLE_NAMES.USERPROVIDER, { transaction })
+      await queryInterface.dropTable(TABLE_NAMES.PROVIDER, { transaction })
       await transaction.commit()
     } catch (err) {
+      console.error('Migration failed, rolling back')
       await transaction.rollback()
       throw err
     }
